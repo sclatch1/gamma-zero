@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gamma-zero</title>
+<style>
+  :root {
+    --page-bg: #1a1a1a;
+    --light-square: #6e6b6a;
+    --dark-square: #545250;
+    --highlight: #7fb069;
+    --selected: #d9a441;
+    --border: #8a8a8a;
+    --text: #d0d0d0;
+    --panel-bg: #242424;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--page-bg);
+    color: var(--text);
+    font-family: Georgia, 'Times New Roman', serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px;
+    margin: 0;
+  }
+  h1 { font-size: 20px; font-weight: normal; letter-spacing: 0.04em; margin: 0 0 4px; }
+  .subtitle { font-size: 13px; opacity: 0.65; margin: 0 0 20px; }
+  #board {
+    display: grid;
+    grid-template-columns: repeat(5, 64px);
+    grid-template-rows: repeat(5, 64px);
+    border: 2px solid var(--border);
+  }
+  .square {
+    width: 64px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 42px;
+    cursor: default;
+    position: relative;
+    user-select: none;
+  }
+  .light { background: var(--light-square); }
+  .dark { background: var(--dark-square); }
+  .square.selected { outline: 3px solid var(--selected); outline-offset: -3px; }
+  .square.movable { cursor: pointer; }
+  .square.movable::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--highlight);
+    opacity: 0.8;
+  }
+  .square.movable.has-piece-cell::after {
+    width: 60px;
+    height: 60px;
+    border-radius: 8px;
+    background: transparent;
+    border: 3px solid var(--highlight);
+  }
+  .piece-white { color: #ffffff; -webkit-text-stroke: 1px #000; }
+  .piece-black { color: #3a3a3a; -webkit-text-stroke: 1px #e8e8e8; }
+  .labels-row { display: grid; grid-template-columns: repeat(5, 64px); margin-top: 6px; }
+  .labels-row span { text-align: center; font-size: 13px; opacity: 0.8; }
+  #panel { margin-top: 20px; width: 320px; text-align: center; }
+  #status { font-size: 15px; min-height: 22px; margin-bottom: 8px; }
+  #log { font-size: 13px; opacity: 0.75; min-height: 18px; margin-bottom: 14px; }
+  button {
+    background: var(--panel-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 18px;
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  button:hover { background: #333; }
+  #promo-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+  }
+  #promo-overlay.open { display: flex; }
+  #promo-box {
+    background: var(--panel-bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 20px; text-align: center;
+  }
+  #promo-box p { margin: 0 0 12px; font-size: 14px; }
+  #promo-choices { display: flex; gap: 10px; }
+  #promo-choices button { font-size: 24px; padding: 10px 14px; }
+</style>
+</head>
+<body>
+  <h1>gamma-zero</h1>
+  <p class="subtitle">Gardner Minichess &mdash; you (White) vs. an untrained raw network (Black)</p>
+
+  <div id="board"></div>
+  <div class="labels-row" id="file-labels"></div>
+
+  <div id="panel">
+    <div id="status">Loading&hellip;</div>
+    <div id="log"></div>
+    <button id="new-game">New game</button>
+  </div>
+
+  <div id="promo-overlay">
+    <div id="promo-box">
+      <p>Promote to:</p>
+      <div id="promo-choices">
+        <button data-promo="Q">&#9813;</button>
+        <button data-promo="R">&#9814;</button>
+        <button data-promo="B">&#9815;</button>
+        <button data-promo="N">&#9816;</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const FILES = ['a', 'b', 'c', 'd', 'e'];
+const WHITE_GLYPHS = {K:'♔', Q:'♕', R:'♖', B:'♗', N:'♘', P:'♙'};
+const BLACK_GLYPHS = {K:'♚', Q:'♛', R:'♜', B:'♝', N:'♞', P:'♟'};
+
+const boardEl = document.getElementById('board');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const promoOverlay = document.getElementById('promo-overlay');
+
+let state = null;
+let selected = null; // [row, col] or null
+let pendingPromo = null; // {from, to} awaiting a promo choice
+
+function squareEl(row, col) {
+  return boardEl.querySelector(`[data-row="${row}"][data-col="${col}"]`);
+}
+
+function glyphFor(symbol) {
+  if (!symbol) return '';
+  const isWhite = symbol === symbol.toUpperCase();
+  const table = isWhite ? WHITE_GLYPHS : BLACK_GLYPHS;
+  return table[symbol.toUpperCase()] || '';
+}
+
+function movesFrom(row, col) {
+  if (!state) return [];
+  return state.legal_moves.filter(m => m.from[0] === row && m.from[1] === col);
+}
+
+function render() {
+  boardEl.innerHTML = '';
+  // rank 5 at top (row 4) down to rank 1 (row 0), matching the CLI/SVG view
+  for (let row = 4; row >= 0; row--) {
+    for (let col = 0; col < 5; col++) {
+      const div = document.createElement('div');
+      div.className = 'square ' + ((row + col) % 2 === 0 ? 'light' : 'dark');
+      div.dataset.row = row;
+      div.dataset.col = col;
+
+      const symbol = state.board[row][col];
+      if (symbol) {
+        div.textContent = glyphFor(symbol);
+        div.classList.add(symbol === symbol.toUpperCase() ? 'piece-white' : 'piece-black');
+        div.classList.add('has-piece-cell');
+      }
+
+      if (selected && selected[0] === row && selected[1] === col) {
+        div.classList.add('selected');
+      }
+
+      const reachable = selected && movesFrom(selected[0], selected[1]).some(m => m.to[0] === row && m.to[1] === col);
+      if (reachable) {
+        div.classList.add('movable');
+      } else if (!selected && state.status === 'ongoing' && movesFrom(row, col).length > 0) {
+        div.classList.add('movable');
+      }
+
+      div.addEventListener('click', () => onSquareClick(row, col));
+      boardEl.appendChild(div);
+    }
+  }
+
+  const labelsRow = document.getElementById('file-labels');
+  labelsRow.innerHTML = '';
+  FILES.forEach(f => {
+    const span = document.createElement('span');
+    span.textContent = f;
+    labelsRow.appendChild(span);
+  });
+
+  renderStatus();
+}
+
+function renderStatus() {
+  if (!state) return;
+  const side = state.turn === 'w' ? 'White' : 'Black';
+  if (state.status === 'checkmate') {
+    const winner = state.turn === 'w' ? 'Black' : 'White';
+    statusEl.textContent = `Checkmate — ${winner} wins.`;
+  } else if (state.status === 'stalemate') {
+    statusEl.textContent = 'Stalemate — draw.';
+  } else if (state.status === 'draw') {
+    statusEl.textContent = 'Draw — move limit reached.';
+  } else {
+    statusEl.textContent = `${side} to move.`;
+  }
+
+  const parts = [];
+  if (state.human_move) parts.push(`You played ${state.human_move}.`);
+  if (state.network_move) parts.push(`Network played ${state.network_move}.`);
+  logEl.textContent = parts.join(' ');
+}
+
+function onSquareClick(row, col) {
+  if (!state || state.status !== 'ongoing') return;
+
+  if (selected) {
+    const candidates = movesFrom(selected[0], selected[1]).filter(m => m.to[0] === row && m.to[1] === col);
+    if (candidates.length > 0) {
+      if (candidates.length > 1) {
+        pendingPromo = { from: selected, to: [row, col] };
+        promoOverlay.classList.add('open');
+      } else {
+        submitMove(selected, [row, col], candidates[0].promo);
+      }
+      selected = null;
+      render();
+      return;
+    }
+  }
+
+  // select a piece with at least one legal move
+  if (movesFrom(row, col).length > 0) {
+    selected = [row, col];
+  } else {
+    selected = null;
+  }
+  render();
+}
+
+async function submitMove(from, to, promo) {
+  const res = await fetch('/api/move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_sq: from, to_sq: to, promo: promo || null }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    statusEl.textContent = body.detail || 'Move rejected.';
+    return;
+  }
+  state = await res.json();
+  render();
+}
+
+document.getElementById('promo-choices').addEventListener('click', (e) => {
+  const promo = e.target.dataset.promo;
+  if (!promo || !pendingPromo) return;
+  promoOverlay.classList.remove('open');
+  submitMove(pendingPromo.from, pendingPromo.to, promo);
+  pendingPromo = null;
+});
+
+document.getElementById('new-game').addEventListener('click', async () => {
+  const res = await fetch('/api/new_game', { method: 'POST' });
+  state = await res.json();
+  selected = null;
+  render();
+});
+
+async function init() {
+  const res = await fetch('/api/state');
+  state = await res.json();
+  render();
+}
+
+init();
+</script>
+</body>
+</html>
